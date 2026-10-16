@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!--
+  Règle de sécurité (CSP) : la page n'a le droit de rien charger ni envoyer.
+  - default-src 'none' : tout est interdit par défaut (connexions, images, polices…) ;
+  - connect-src non autorisé : aucun fetch ni envoi de données n'est possible ;
+  - style-src / script-src 'unsafe-inline' : seuls le style et le script écrits ici ;
+  - img-src data: : seulement pour l'icône vide ci-dessous ;
+  - media-src blob: mediastream: : sources vidéo locales (flux de la caméra), jamais le réseau.
+  SI LA VIDÉO NE S'AFFICHE PAS : cette règle est le premier réglage à assouplir
+  (par exemple élargir media-src, ou retirer la balise pour tester), puis regarder
+  la console du navigateur, qui indique ce qui a été bloqué.
+-->
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; media-src blob: mediastream:; base-uri 'none'; form-action 'none'">
+<!-- Icône vide : empêche le navigateur de demander /favicon.ico au serveur -->
+<link rel="icon" href="data:,">
+<title>Test caméra QR</title>
+<style>
+  :root { --fond: #f6f6f4; --carte: #fff; --texte: #1d1d1b; --doux: #666; --ok: #1a7f37; --non: #b42318; --bord: #ddd; --bouton: #1f4fd1; }
+  @media (prefers-color-scheme: dark) {
+    :root { --fond: #151515; --carte: #222; --texte: #eee; --doux: #aaa; --ok: #4ac26b; --non: #ff7b72; --bord: #3a3a3a; --bouton: #4a7dff; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 16px; background: var(--fond); color: var(--texte);
+         font: 17px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 640px; margin: 0 auto; }
+  h1 { font-size: 1.4rem; margin: 0 0 12px; }
+  h2 { font-size: 1.1rem; margin: 0 0 8px; }
+  section { background: var(--carte); border: 1px solid var(--bord); border-radius: 12px; padding: 14px; margin-bottom: 14px; }
+  dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 0; }
+  dt { color: var(--doux); }
+  dd { margin: 0; word-break: break-word; }
+  .ok { color: var(--ok); font-weight: 600; }
+  .non { color: var(--non); font-weight: 600; }
+  .boutons { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+  button { flex: 1 1 160px; min-height: 52px; font: inherit; font-weight: 600; border: 0; border-radius: 10px;
+           background: var(--bouton); color: #fff; cursor: pointer; }
+  button:disabled { opacity: .4; cursor: default; }
+  button.secondaire { background: transparent; color: var(--texte); border: 2px solid var(--bord); }
+  video { width: 100%; border-radius: 10px; background: #000; display: block; aspect-ratio: 4 / 3; object-fit: cover; }
+  #erreur { color: var(--non); font-weight: 600; min-height: 1.4em; margin: 8px 0 0; }
+  #texteLu { font-family: ui-monospace, Consolas, monospace; font-size: .95rem; }
+  textarea { width: 100%; min-height: 220px; font: .85rem/1.4 ui-monospace, Consolas, monospace;
+             background: var(--fond); color: var(--texte); border: 1px solid var(--bord); border-radius: 8px; padding: 8px; }
+  .note { color: var(--doux); font-size: .85rem; margin: 8px 0 0; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Test de lecture du QR par la caméra</h1>
+
+  <section>
+    <h2>Diagnostic</h2>
+    <dl>
+      <dt>Système</dt><dd id="systeme">…</dd>
+      <dt>Navigateur</dt><dd id="navigateur">…</dd>
+      <dt>HTTPS</dt><dd id="https">…</dd>
+      <dt>getUserMedia</dt><dd id="gum">…</dd>
+      <dt>BarcodeDetector</dt><dd id="bd">…</dd>
+      <dt>Formats</dt><dd id="formats">…</dd>
+      <dt>qr_code</dt><dd id="qr">…</dd>
+    </dl>
+    <p class="note">Sur iPhone et iPad, tous les navigateurs utilisent le moteur de Safari.
+      Chrome sous Android masque souvent la version d'Android (« Android 10 »).</p>
+  </section>
+
+  <section>
+    <h2>Caméra</h2>
+    <div class="boutons">
+      <button id="demarrer">Démarrer la caméra</button>
+      <button id="arreter" class="secondaire" disabled>Arrêter la caméra</button>
+    </div>
+    <video id="video" playsinline muted></video>
+    <p id="erreur" role="alert"></p>
+    <dl>
+      <dt>Caméra obtenue</dt><dd id="cameraObtenue">—</dd>
+      <dt>Ouverture</dt><dd id="tOuverture">—</dd>
+      <dt>Première lecture</dt><dd id="tLecture">—</dd>
+      <dt>Lectures</dt><dd id="nbLectures">0</dd>
+      <dt>Texte lu</dt><dd id="texteLu">—</dd>
+    </dl>
+    <p class="note">« Ouverture » : du clic à la première image, y compris le temps de réponse à la
+      demande d'autorisation la première fois. « Première lecture » : de la première image à la
+      première lecture réussie.</p>
+  </section>
+
+  <section>
+    <h2>Résumé à copier</h2>
+    <textarea id="resume" readonly></textarea>
+    <div class="boutons"><button id="copier" class="secondaire">Copier le résumé</button></div>
+    <p class="note" id="copieEtat">Le texte lu dans le QR n'est volontairement pas inclus.</p>
+  </section>
+</main>
+
+<script>
+"use strict";
+// Page de test du lot 2.3 : aucune donnée n'est envoyée (voir la règle CSP en haut du fichier).
+
+const $ = (id) => document.getElementById(id);
+const video = $("video");
+
+// État de la page
+const etat = {
+  https: window.isSecureContext,
+  gum: !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia),
+  bd: "BarcodeDetector" in window,
+  formats: null,        // liste renvoyée par getSupportedFormats, ou null
+  qr: false,            // le lecteur intégré gère-t-il qr_code ?
+  flux: null,           // flux de la caméra en cours
+  session: 0,           // numéro de démarrage : empêche deux boucles de lecture en même temps
+  tOuverture: null,     // ms, du clic à la première image
+  tLecture: null,       // ms, de la première image à la première lecture
+  nb: 0,
+};
+
+// --- Système et navigateur, tirés de navigator.userAgent ---
+function systeme(ua) {
+  let m;
+  if ((m = ua.match(/Android\s([\d.]+)/))) return "Android " + m[1];
+  if ((m = ua.match(/(iPhone|iPad|iPod).*? OS (\d+(?:_\d+)*)/))) return "iOS/iPadOS " + m[2].replace(/_/g, ".") + " (" + m[1] + ")";
+  // Les iPad récents se présentent comme un Mac : on les reconnaît à l'écran tactile
+  if (/Macintosh/.test(ua)) return navigator.maxTouchPoints > 1 ? "iPadOS (se présente comme macOS)" : "macOS";
+  if ((m = ua.match(/Windows NT ([\d.]+)/))) return "Windows (NT " + m[1] + ")";
+  if (/CrOS/.test(ua)) return "ChromeOS";
+  if (/Linux/.test(ua)) return "Linux";
+  return "inconnu";
+}
+function navigateur(ua) {
+  // L'ordre compte : Edge, Opera et Samsung Internet contiennent aussi « Chrome »
+  const regles = [
+    [/SamsungBrowser\/([\d.]+)/, "Samsung Internet"], [/EdgA?\/([\d.]+)/, "Edge"],
+    [/EdgiOS\/([\d.]+)/, "Edge (iOS)"], [/OPR\/([\d.]+)/, "Opera"],
+    [/FxiOS\/([\d.]+)/, "Firefox (iOS)"], [/Firefox\/([\d.]+)/, "Firefox"],
+    [/CriOS\/([\d.]+)/, "Chrome (iOS)"], [/Chrome\/([\d.]+)/, "Chrome"],
+    [/Version\/([\d.]+).*Safari/, "Safari"],
+  ];
+  for (const [re, nom] of regles) { const m = ua.match(re); if (m) return nom + " " + m[1]; }
+  return "inconnu";
+}
+
+// Affiche oui / non en couleur (textContent : jamais de HTML injecté)
+function ouiNon(id, valeur) {
+  const el = $(id);
+  el.textContent = valeur ? "oui" : "non";
+  el.className = valeur ? "ok" : "non";
+}
+const ms = (v) => (v === null ? "—" : Math.round(v) + " ms");
+
+// --- Résumé à copier ---
+function majResume() {
+  const ua = navigator.userAgent;
+  const lignes = [
+    "Test caméra QR — " + new Date().toISOString(),
+    "Système : " + systeme(ua),
+    "Navigateur : " + navigateur(ua),
+    "HTTPS (isSecureContext) : " + (etat.https ? "oui" : "non"),
+    "getUserMedia : " + (etat.gum ? "oui" : "non"),
+    "BarcodeDetector : " + (etat.bd ? "oui" : "non"),
+    "qr_code pris en charge : " + (etat.qr ? "oui" : "non"),
+    "Caméra obtenue : " + $("cameraObtenue").textContent,
+    "Ouverture de la caméra : " + ms(etat.tOuverture),
+    "Première lecture : " + (etat.tLecture === null ? "non lu" : ms(etat.tLecture)),
+    "Erreur : " + ($("erreur").textContent || "aucune"),
+    "userAgent : " + ua,
+  ];
+  $("resume").value = lignes.join("\n");
+}
+
+// --- Diagnostic au chargement ---
+async function diagnostic() {
+  const ua = navigator.userAgent;
+  $("systeme").textContent = systeme(ua);
+  $("navigateur").textContent = navigateur(ua);
+  ouiNon("https", etat.https);
+  ouiNon("gum", etat.gum);
+  ouiNon("bd", etat.bd);
+  if (etat.bd) {
+    try {
+      etat.formats = await BarcodeDetector.getSupportedFormats();
+      $("formats").textContent = etat.formats.length ? etat.formats.join(", ") : "(aucun)";
+      etat.qr = etat.formats.includes("qr_code");
+    } catch (e) {
+      $("formats").textContent = "erreur : " + e.message;
+    }
+  } else {
+    $("formats").textContent = "—";
+  }
+  ouiNon("qr", etat.qr);
+  if (!etat.gum) erreur(etat.https ? "getUserMedia indisponible dans ce navigateur."
+                                  : "getUserMedia indisponible : la page doit être en HTTPS.");
+  majResume();
+}
+
+function erreur(message) { $("erreur").textContent = message; majResume(); }
+
+// Traduit les erreurs de getUserMedia en français
+function messageCamera(e) {
+  switch (e.name) {
+    case "NotAllowedError":
+    case "SecurityError": return "Permission refusée : autorisez la caméra dans les réglages du navigateur.";
+    case "NotFoundError":
+    case "OverconstrainedError": return "Aucune caméra trouvée.";
+    case "NotReadableError":
+    case "AbortError": return "Caméra déjà utilisée par une autre application.";
+    default: return "Erreur inattendue de la caméra : " + e.name + " (" + e.message + ")";
+  }
+}
+
+// Attend que la vidéo affiche sa première image
+function premiereImage() {
+  return new Promise((ok) => {
+    if ("requestVideoFrameCallback" in video) video.requestVideoFrameCallback(() => ok());
+    else if (video.readyState >= 2) ok();
+    else video.addEventListener("loadeddata", () => ok(), { once: true });
+  });
+}
+
+// --- Démarrer la caméra ---
+async function demarrer() {
+  erreur("");
+  if (!etat.gum) { diagnostic(); return; }
+  $("demarrer").disabled = true;
+  etat.tOuverture = etat.tLecture = null; etat.nb = 0;
+  $("tOuverture").textContent = $("tLecture").textContent = $("texteLu").textContent = "—";
+  $("nbLectures").textContent = "0";
+  const session = ++etat.session;
+  const t0 = performance.now();
+  try {
+    // ideal (et non exact) : un PC sans caméra arrière ouvre quand même sa caméra
+    etat.flux = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" } }, audio: false });
+  } catch (e) {
+    erreur(messageCamera(e));
+    $("demarrer").disabled = false;
+    return;
+  }
+  const piste = etat.flux.getVideoTracks()[0];
+  const reglages = piste && piste.getSettings ? piste.getSettings() : {};
+  $("cameraObtenue").textContent = (reglages.facingMode || "non indiqué par le navigateur") +
+    (reglages.width ? " — " + reglages.width + "×" + reglages.height : "");
+  video.srcObject = etat.flux;
+  try { await video.play(); } catch (e) { erreur("La vidéo ne démarre pas : " + e.message); }
+  await premiereImage();
+  etat.tOuverture = performance.now() - t0;
+  $("tOuverture").textContent = ms(etat.tOuverture);
+  $("arreter").disabled = false;
+
+  if (!etat.bd) erreur("Lecteur de QR intégré absent dans ce navigateur (voir lot 2.4).");
+  else if (!etat.qr) erreur("Le lecteur intégré ne gère pas qr_code (voir lot 2.4).");
+  else lire(new BarcodeDetector({ formats: ["qr_code"] }), session, performance.now());
+  majResume();
+}
+
+// --- Lecture en continu : une détection à la fois, environ toutes les 150 ms ---
+async function lire(detecteur, session, tDebut) {
+  if (session !== etat.session || !etat.flux) return; // caméra arrêtée ou redémarrée
+  try {
+    const codes = await detecteur.detect(video);
+    if (codes.length && session === etat.session) {
+      if (etat.tLecture === null) {
+        etat.tLecture = performance.now() - tDebut;
+        $("tLecture").textContent = ms(etat.tLecture);
+      }
+      etat.nb++;
+      $("nbLectures").textContent = String(etat.nb);
+      $("texteLu").textContent = codes[0].rawValue; // textContent : le contenu du QR n'est jamais interprété comme du HTML
+      majResume();
+    }
+  } catch (e) {
+    // Image pas encore prête : on réessaie au tour suivant
+  }
+  setTimeout(() => lire(detecteur, session, tDebut), 150);
+}
+
+// --- Arrêter la caméra ---
+function arreter() {
+  etat.session++; // arrête la boucle de lecture
+  if (etat.flux) etat.flux.getTracks().forEach((p) => p.stop());
+  etat.flux = null;
+  video.srcObject = null;
+  $("arreter").disabled = true;
+  $("demarrer").disabled = false;
+  majResume();
+}
+
+// --- Copier le résumé ---
+async function copier() {
+  majResume();
+  try {
+    await navigator.clipboard.writeText($("resume").value);
+    $("copieEtat").textContent = "Résumé copié.";
+  } catch (e) {
+    $("resume").select();
+    $("copieEtat").textContent = "Copie automatique impossible : le texte est sélectionné, copiez-le à la main.";
+  }
+}
+
+$("demarrer").addEventListener("click", demarrer);
+$("arreter").addEventListener("click", arreter);
+$("copier").addEventListener("click", copier);
+// Page passée en arrière-plan : on coupe la caméra pour ne pas la laisser allumée
+document.addEventListener("visibilitychange", () => { if (document.hidden && etat.flux) arreter(); });
+diagnostic();
+</script>
+</body>
+</html>
