@@ -6,8 +6,10 @@
 <!--
   Règle de sécurité (CSP) : la page n'a le droit de rien charger ni envoyer.
   - default-src 'none' : tout est interdit par défaut (connexions, images, polices…) ;
-  - connect-src non autorisé : aucun fetch ni envoi de données n'est possible ;
-  - style-src / script-src 'unsafe-inline' : seuls le style et le script écrits ici ;
+  - connect-src 'none' : aucun fetch ni envoi de données n'est possible ;
+  - script-src 'self' : seulement les fichiers .js servis par le même site (page.js et la
+    bibliothèque) ; aucun script écrit dans la page, aucun CDN ;
+  - style-src 'unsafe-inline' : seulement le style écrit ici ;
   - img-src data: : seulement pour l'icône vide ci-dessous ;
   - media-src blob: mediastream: : sources vidéo locales (flux de la caméra), jamais le réseau.
   SI LA VIDÉO NE S'AFFICHE PAS : cette règle est le premier réglage à assouplir
@@ -15,7 +17,7 @@
   la console du navigateur, qui indique ce qui a été bloqué.
 -->
 <meta http-equiv="Content-Security-Policy"
-      content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; media-src blob: mediastream:; base-uri 'none'; form-action 'none'">
+      content="default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src data:; media-src blob: mediastream:; connect-src 'none'; base-uri 'none'; form-action 'none'">
 <!-- Icône vide : empêche le navigateur de demander /favicon.ico au serveur -->
 <link rel="icon" href="data:,">
 <title>Test caméra QR</title>
@@ -47,6 +49,8 @@
   textarea { width: 100%; min-height: 220px; font: .85rem/1.4 ui-monospace, Consolas, monospace;
              background: var(--fond); color: var(--texte); border: 1px solid var(--bord); border-radius: 8px; padding: 8px; }
   .note { color: var(--doux); font-size: .85rem; margin: 8px 0 0; }
+  label.case { display: flex; align-items: center; gap: 10px; min-height: 44px; margin-bottom: 10px; }
+  label.case input { width: 22px; height: 22px; }
 </style>
 </head>
 <body>
@@ -63,6 +67,7 @@
       <dt>BarcodeDetector</dt><dd id="bd">…</dd>
       <dt>Formats</dt><dd id="formats">…</dd>
       <dt>qr_code</dt><dd id="qr">…</dd>
+      <dt>Bibliothèque ZXing</dt><dd id="zxing">…</dd>
     </dl>
     <p class="note">Sur iPhone et iPad, tous les navigateurs utilisent le moteur de Safari.
       Chrome sous Android masque souvent la version d'Android (« Android 10 »).</p>
@@ -70,6 +75,7 @@
 
   <section>
     <h2>Caméra</h2>
+    <label class="case"><input type="checkbox" id="forcer"> Forcer la bibliothèque (même si le lecteur intégré existe)</label>
     <div class="boutons">
       <button id="demarrer">Démarrer la caméra</button>
       <button id="arreter" class="secondaire" disabled>Arrêter la caméra</button>
@@ -77,15 +83,18 @@
     <video id="video" playsinline muted></video>
     <p id="erreur" role="alert"></p>
     <dl>
+      <dt>Lecteur utilisé</dt><dd id="lecteur">—</dd>
       <dt>Caméra obtenue</dt><dd id="cameraObtenue">—</dd>
       <dt>Ouverture</dt><dd id="tOuverture">—</dd>
       <dt>Première lecture</dt><dd id="tLecture">—</dd>
+      <dt>Tentative (moy.)</dt><dd id="tMoyenne">—</dd>
       <dt>Lectures</dt><dd id="nbLectures">0</dd>
       <dt>Texte lu</dt><dd id="texteLu">—</dd>
     </dl>
     <p class="note">« Ouverture » : du clic à la première image, y compris le temps de réponse à la
       demande d'autorisation la première fois. « Première lecture » : de la première image à la
-      première lecture réussie.</p>
+      première lecture réussie. « Tentative (moy.) » : durée moyenne d'un essai de décodage d'une image.
+      La caméra demande 1280×720 si possible.</p>
   </section>
 
   <section>
@@ -96,214 +105,17 @@
   </section>
 </main>
 
-<script>
-"use strict";
-// Page de test du lot 2.3 : aucune donnée n'est envoyée (voir la règle CSP en haut du fichier).
-
-const $ = (id) => document.getElementById(id);
-const video = $("video");
-
-// État de la page
-const etat = {
-  https: window.isSecureContext,
-  gum: !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia),
-  bd: "BarcodeDetector" in window,
-  formats: null,        // liste renvoyée par getSupportedFormats, ou null
-  qr: false,            // le lecteur intégré gère-t-il qr_code ?
-  flux: null,           // flux de la caméra en cours
-  session: 0,           // numéro de démarrage : empêche deux boucles de lecture en même temps
-  tOuverture: null,     // ms, du clic à la première image
-  tLecture: null,       // ms, de la première image à la première lecture
-  nb: 0,
-};
-
-// --- Système et navigateur, tirés de navigator.userAgent ---
-function systeme(ua) {
-  let m;
-  if ((m = ua.match(/Android\s([\d.]+)/))) return "Android " + m[1];
-  if ((m = ua.match(/(iPhone|iPad|iPod).*? OS (\d+(?:_\d+)*)/))) return "iOS/iPadOS " + m[2].replace(/_/g, ".") + " (" + m[1] + ")";
-  // Les iPad récents se présentent comme un Mac : on les reconnaît à l'écran tactile
-  if (/Macintosh/.test(ua)) return navigator.maxTouchPoints > 1 ? "iPadOS (se présente comme macOS)" : "macOS";
-  if ((m = ua.match(/Windows NT ([\d.]+)/))) return "Windows (NT " + m[1] + ")";
-  if (/CrOS/.test(ua)) return "ChromeOS";
-  if (/Linux/.test(ua)) return "Linux";
-  return "inconnu";
-}
-function navigateur(ua) {
-  // L'ordre compte : Edge, Opera et Samsung Internet contiennent aussi « Chrome »
-  const regles = [
-    [/SamsungBrowser\/([\d.]+)/, "Samsung Internet"], [/EdgA?\/([\d.]+)/, "Edge"],
-    [/EdgiOS\/([\d.]+)/, "Edge (iOS)"], [/OPR\/([\d.]+)/, "Opera"],
-    [/FxiOS\/([\d.]+)/, "Firefox (iOS)"], [/Firefox\/([\d.]+)/, "Firefox"],
-    [/CriOS\/([\d.]+)/, "Chrome (iOS)"], [/Chrome\/([\d.]+)/, "Chrome"],
-    [/Version\/([\d.]+).*Safari/, "Safari"],
-  ];
-  for (const [re, nom] of regles) { const m = ua.match(re); if (m) return nom + " " + m[1]; }
-  return "inconnu";
-}
-
-// Affiche oui / non en couleur (textContent : jamais de HTML injecté)
-function ouiNon(id, valeur) {
-  const el = $(id);
-  el.textContent = valeur ? "oui" : "non";
-  el.className = valeur ? "ok" : "non";
-}
-const ms = (v) => (v === null ? "—" : Math.round(v) + " ms");
-
-// --- Résumé à copier ---
-function majResume() {
-  const ua = navigator.userAgent;
-  const lignes = [
-    "Test caméra QR — " + new Date().toISOString(),
-    "Système : " + systeme(ua),
-    "Navigateur : " + navigateur(ua),
-    "HTTPS (isSecureContext) : " + (etat.https ? "oui" : "non"),
-    "getUserMedia : " + (etat.gum ? "oui" : "non"),
-    "BarcodeDetector : " + (etat.bd ? "oui" : "non"),
-    "qr_code pris en charge : " + (etat.qr ? "oui" : "non"),
-    "Caméra obtenue : " + $("cameraObtenue").textContent,
-    "Ouverture de la caméra : " + ms(etat.tOuverture),
-    "Première lecture : " + (etat.tLecture === null ? "non lu" : ms(etat.tLecture)),
-    "Erreur : " + ($("erreur").textContent || "aucune"),
-    "userAgent : " + ua,
-  ];
-  $("resume").value = lignes.join("\n");
-}
-
-// --- Diagnostic au chargement ---
-async function diagnostic() {
-  const ua = navigator.userAgent;
-  $("systeme").textContent = systeme(ua);
-  $("navigateur").textContent = navigateur(ua);
-  ouiNon("https", etat.https);
-  ouiNon("gum", etat.gum);
-  ouiNon("bd", etat.bd);
-  if (etat.bd) {
-    try {
-      etat.formats = await BarcodeDetector.getSupportedFormats();
-      $("formats").textContent = etat.formats.length ? etat.formats.join(", ") : "(aucun)";
-      etat.qr = etat.formats.includes("qr_code");
-    } catch (e) {
-      $("formats").textContent = "erreur : " + e.message;
-    }
-  } else {
-    $("formats").textContent = "—";
-  }
-  ouiNon("qr", etat.qr);
-  if (!etat.gum) erreur(etat.https ? "getUserMedia indisponible dans ce navigateur."
-                                  : "getUserMedia indisponible : la page doit être en HTTPS.");
-  majResume();
-}
-
-function erreur(message) { $("erreur").textContent = message; majResume(); }
-
-// Traduit les erreurs de getUserMedia en français
-function messageCamera(e) {
-  switch (e.name) {
-    case "NotAllowedError":
-    case "SecurityError": return "Permission refusée : autorisez la caméra dans les réglages du navigateur.";
-    case "NotFoundError":
-    case "OverconstrainedError": return "Aucune caméra trouvée.";
-    case "NotReadableError":
-    case "AbortError": return "Caméra déjà utilisée par une autre application.";
-    default: return "Erreur inattendue de la caméra : " + e.name + " (" + e.message + ")";
-  }
-}
-
-// Attend que la vidéo affiche sa première image
-function premiereImage() {
-  return new Promise((ok) => {
-    if ("requestVideoFrameCallback" in video) video.requestVideoFrameCallback(() => ok());
-    else if (video.readyState >= 2) ok();
-    else video.addEventListener("loadeddata", () => ok(), { once: true });
-  });
-}
-
-// --- Démarrer la caméra ---
-async function demarrer() {
-  erreur("");
-  if (!etat.gum) { diagnostic(); return; }
-  $("demarrer").disabled = true;
-  etat.tOuverture = etat.tLecture = null; etat.nb = 0;
-  $("tOuverture").textContent = $("tLecture").textContent = $("texteLu").textContent = "—";
-  $("nbLectures").textContent = "0";
-  const session = ++etat.session;
-  const t0 = performance.now();
-  try {
-    // ideal (et non exact) : un PC sans caméra arrière ouvre quand même sa caméra
-    etat.flux = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" } }, audio: false });
-  } catch (e) {
-    erreur(messageCamera(e));
-    $("demarrer").disabled = false;
-    return;
-  }
-  const piste = etat.flux.getVideoTracks()[0];
-  const reglages = piste && piste.getSettings ? piste.getSettings() : {};
-  $("cameraObtenue").textContent = (reglages.facingMode || "non indiqué par le navigateur") +
-    (reglages.width ? " — " + reglages.width + "×" + reglages.height : "");
-  video.srcObject = etat.flux;
-  try { await video.play(); } catch (e) { erreur("La vidéo ne démarre pas : " + e.message); }
-  await premiereImage();
-  etat.tOuverture = performance.now() - t0;
-  $("tOuverture").textContent = ms(etat.tOuverture);
-  $("arreter").disabled = false;
-
-  if (!etat.bd) erreur("Lecteur de QR intégré absent dans ce navigateur (voir lot 2.4).");
-  else if (!etat.qr) erreur("Le lecteur intégré ne gère pas qr_code (voir lot 2.4).");
-  else lire(new BarcodeDetector({ formats: ["qr_code"] }), session, performance.now());
-  majResume();
-}
-
-// --- Lecture en continu : une détection à la fois, environ toutes les 150 ms ---
-async function lire(detecteur, session, tDebut) {
-  if (session !== etat.session || !etat.flux) return; // caméra arrêtée ou redémarrée
-  try {
-    const codes = await detecteur.detect(video);
-    if (codes.length && session === etat.session) {
-      if (etat.tLecture === null) {
-        etat.tLecture = performance.now() - tDebut;
-        $("tLecture").textContent = ms(etat.tLecture);
-      }
-      etat.nb++;
-      $("nbLectures").textContent = String(etat.nb);
-      $("texteLu").textContent = codes[0].rawValue; // textContent : le contenu du QR n'est jamais interprété comme du HTML
-      majResume();
-    }
-  } catch (e) {
-    // Image pas encore prête : on réessaie au tour suivant
-  }
-  setTimeout(() => lire(detecteur, session, tDebut), 150);
-}
-
-// --- Arrêter la caméra ---
-function arreter() {
-  etat.session++; // arrête la boucle de lecture
-  if (etat.flux) etat.flux.getTracks().forEach((p) => p.stop());
-  etat.flux = null;
-  video.srcObject = null;
-  $("arreter").disabled = true;
-  $("demarrer").disabled = false;
-  majResume();
-}
-
-// --- Copier le résumé ---
-async function copier() {
-  majResume();
-  try {
-    await navigator.clipboard.writeText($("resume").value);
-    $("copieEtat").textContent = "Résumé copié.";
-  } catch (e) {
-    $("resume").select();
-    $("copieEtat").textContent = "Copie automatique impossible : le texte est sélectionné, copiez-le à la main.";
-  }
-}
-
-$("demarrer").addEventListener("click", demarrer);
-$("arreter").addEventListener("click", arreter);
-$("copier").addEventListener("click", copier);
-// Page passée en arrière-plan : on coupe la caméra pour ne pas la laisser allumée
-document.addEventListener("visibilitychange", () => { if (document.hidden && etat.flux) arreter(); });
-diagnostic();
-</script>
+<!--
+  Bibliothèque de lecture de QR, copiée SANS MODIFICATION depuis le paquet npm :
+  - nom : @zxing/library (https://github.com/zxing-js/library), fichier umd/index.min.js
+  - version : 0.23.0 (publiée le 29/04/2026)
+  - licence : Apache-2.0, texte complet dans zxing-library-LICENSE.txt
+  - SHA-256 : 3ede94153fb0c5b67a12d7adff6decd827c2b22714fdc6faecf27a8f20937ea6
+  Ne pas la modifier : l'empreinte ne correspondrait plus. Elle n'est utilisée que si le
+  lecteur intégré (BarcodeDetector) ne gère pas qr_code, ou si « Forcer la bibliothèque » est coché.
+-->
+<script src="zxing-library-0.23.0.min.js"></script>
+<!-- Code de la page (séparé car la règle CSP interdit le script écrit dans la page) -->
+<script src="page.js"></script>
 </body>
 </html>
